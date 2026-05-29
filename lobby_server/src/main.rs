@@ -441,7 +441,6 @@ impl State {
 
                 Ok(())
             }
-            ClientToLobby::SetLobbySettings { settings } => todo!(),
             ClientToLobby::GetLobbySettings => {
                 let player = self.players.get(&from).unwrap();
                 let Some(lobby_id) = player.in_lobby else {
@@ -452,6 +451,27 @@ impl State {
                 };
                 let settings = lobby.settings.clone();
                 self.send_message(from, LobbyToClient::LobbySettings { settings });
+
+                Ok(())
+            }
+            ClientToLobby::SetLobbySettings { settings } => {
+                let player = self.players.get(&from).unwrap();
+                let Some(lobby_id) = player.in_lobby else {
+                    bail!("Cannot set lobby settings while not in a lobby");
+                };
+                let Some(lobby) = self.lobbies.get_mut(&lobby_id) else {
+                    bail!("Cannot find lobby");
+                };
+                if lobby.leader != from {
+                    bail!("Cannot set settings while not lobby leader");
+                }
+                if !settings.validate() {
+                    bail!("Cannot set invalid settings");
+                }
+
+                lobby.update_settings(settings.clone());
+
+                self.send_message_to_lobby(lobby_id, None, LobbyToClient::LobbySettings { settings });
 
                 Ok(())
             }
