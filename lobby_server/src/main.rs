@@ -441,8 +441,20 @@ impl State {
 
                 Ok(())
             }
-            ClientToLobby::GetLobbySettings => todo!(),
             ClientToLobby::SetLobbySettings { settings } => todo!(),
+            ClientToLobby::GetLobbySettings => {
+                let player = self.players.get(&from).unwrap();
+                let Some(lobby_id) = player.in_lobby else {
+                    bail!("Cannot get lobby settings while not in a lobby");
+                };
+                let Some(lobby) = self.lobbies.get_mut(&lobby_id) else {
+                    bail!("Cannot find lobby");
+                };
+                let settings = lobby.settings.clone();
+                self.send_message(from, LobbyToClient::LobbySettings { settings });
+
+                Ok(())
+            }
             ClientToLobby::SetReady { ready } => todo!(),
             ClientToLobby::ForceLobbyReady => todo!(),
             ClientToLobby::SelectChampion { champion } => todo!(),

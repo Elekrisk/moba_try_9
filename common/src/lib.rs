@@ -77,6 +77,12 @@ pub struct LobbySettings {
     pub allows_team_switching: bool,
 }
 
+impl LobbySettings {
+    pub fn validate(&self) -> bool {
+        !self.name.is_empty() && self.team_count > 0 && self.players_per_team > 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientToLobby {
     Handshake { username: String },
