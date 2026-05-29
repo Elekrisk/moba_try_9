@@ -6,53 +6,20 @@ use quinn::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
-pub struct Id<M> {
-    uuid: Uuid,
-    _phantomdata: PhantomData<M>,
-}
-
-impl<M> Id<M> {
-    pub fn new() -> Self {
-        Self {
-            uuid: Uuid::new_v4(),
-            _phantomdata: PhantomData,
-        }
-    }
-}
-
-impl<M> std::fmt::Debug for Id<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Id").field("uuid", &self.uuid).finish()
-    }
-}
-
-impl<M> Clone for Id<M> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<M> Copy for Id<M> {}
-
-impl<M> PartialEq for Id<M> {
-    fn eq(&self, other: &Self) -> bool {
-        self.uuid == other.uuid
-    }
-}
-
-impl<M> Eq for Id<M> {}
-
-impl<M> Hash for Id<M> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.uuid.hash(state);
-    }
-}
-
 macro_rules! id_type {
     ($marker:ident) => {
-        pub struct ${concat($marker, Marker)};
-        pub type ${concat($marker, Id)} = Id<${concat($marker, Marker)}>;
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub struct ${concat($marker, Id)} {
+            uuid: Uuid,
+        }
+
+        impl ${concat($marker, Id)} {
+            pub fn new() -> Self {
+                Self {
+                    uuid: Uuid::new_v4(),
+                }
+            }
+        }
     };
 }
 
