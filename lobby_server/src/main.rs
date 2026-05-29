@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use anyhow::{anyhow, bail};
 use common::{
-    ChampionId, ClientToLobby, LobbyId, LobbyInfo, LobbySettings, LobbyState, LobbyToClient,
-    PlayerId, PlayerInfo, ReadMsg, ShortLobbyInfo, Team, WriteMsg,
+    ChampionId, ClientToLobby, LeaveReason, LobbyId, LobbyInfo, LobbySettings, LobbyState, LobbyToClient, PlayerId, PlayerInfo, ReadMsg, ShortLobbyInfo, Team, WriteMsg
 };
 use quinn::{
     Connection, Endpoint, Incoming, RecvStream, SendStream, ServerConfig, crypto,
@@ -285,10 +285,14 @@ impl State {
         }
     }
 
-    async fn handle_message(&mut self, from: PlayerId, message: ClientToLobby) {
+    async fn handle_message(
+        &mut self,
+        from: PlayerId,
+        message: ClientToLobby,
+    ) -> anyhow::Result<()> {
         match message {
             ClientToLobby::Handshake { username: _ } => {
-                // Ignore
+                bail!("Handshake is invalid after connection initialization");
             }
             ClientToLobby::GetLobbyList => {
                 let lobbies = self
@@ -297,17 +301,19 @@ impl State {
                     .map(|lobby| lobby.get_short_info())
                     .collect();
                 self.send_message(from, LobbyToClient::LobbyList { lobbies });
+                Ok(())
             }
             ClientToLobby::GetLobbyInfo { id } => {
                 let Some(lobby) = self.lobbies.get(&id) else {
-                    return;
+                    bail!("Lobby not found");
                 };
                 let info = lobby.get_info();
                 self.send_message(from, LobbyToClient::LobbyInfo { info });
+                Ok(())
             }
             ClientToLobby::GetPlayerInfo { player } => {
                 let Some(player) = self.players.get(&player) else {
-                    return;
+                    bail!("Player not found");
                 };
                 self.send_message(
                     from,
@@ -315,13 +321,14 @@ impl State {
                         info: player.get_info(),
                     },
                 );
+                Ok(())
             }
             ClientToLobby::CreateLobby => {
                 let Some(player) = self.players.get(&from) else {
-                    return;
+                    bail!("Player not found");
                 };
                 if player.in_lobby.is_some() {
-                    return;
+                    bail!("Cannot create lobby while in a lobby");
                 }
 
                 let lobby = Lobby {
@@ -347,63 +354,57 @@ impl State {
                 let lobby_id = lobby.id;
                 self.lobbies.insert(lobby_id, lobby);
                 self.send_message(from, LobbyToClient::JoinedLobby { id: lobby_id });
+                Ok(())
             }
             ClientToLobby::JoinLobby { id } => {
-                let Some(player) = self.players.get(&from) else {
-                    return;
-                };
+                let player = self.players.get(&from).unwrap();
                 if player.in_lobby.is_some() {
-                    return;
+                    bail!("Cannot join lobby while in a lobby");
                 }
                 let Some(lobby) = self.lobbies.get_mut(&id) else {
-                    return;
+                    bail!("Lobby not found");
                 };
                 if !lobby.can_join() {
-                    return;
+                    bail!("Cannot join lobby");
                 }
+                lobby.add_player(from);
+                self.send_message_to_lobby(
+                    id,
+                    Some(from),
+                    LobbyToClient::PlayerJoinedLobby { player: from },
+                );
+                self.send_message(from, LobbyToClient::JoinedLobby { id });
+                Ok(())
             }
             ClientToLobby::LeaveLobby => {
-                let Some(player) = self.players.get(&from) else {
-                    return;
-                };
-                let Some(lobby_id) = player.in_lobby else {
-                    return;
-                };
-                let Some(lobby) = self.lobbies.get_mut(&lobby_id) else {
-                    return;
-                };
-                let old_leader = lobby.leader;
-                lobby.remove_player(from);
-                let new_leader = lobby.leader;
-                if lobby.player_count() == 0 {
-                    self.lobbies.remove(&lobby_id);
-                } else {
-                    if lobby.lobby_state == LobbyState::ChampSelect {
-                        lobby.set_lobby_state(LobbyState::Normal);
-                        self.send_message_to_lobby(
-                            lobby_id,
-                            LobbyToClient::LobbyStateChanged {
-                                new_state: LobbyState::Normal,
-                            },
-                        );
-                    }
-                    if old_leader != new_leader {
-                        self.send_message_to_lobby(
-                            lobby_id,
-                            LobbyToClient::PlayerBecameLeader { player: new_leader },
-                        );
-                    }
-                    self.send_message_to_lobby(
-                        lobby_id,
-                        LobbyToClient::PlayerLeftLobby { player: from },
-                    );
-                }
+                self.remove_player_from_lobby(from, LeaveReason::Leave)
             }
             ClientToLobby::KickPlayer { id } => {
                 let kicker = self.players.get(&from).unwrap();
-                let kickee = self.players.get(&id).unwrap();
+                let Some(kickee) = self.players.get(&id) else {
+                    bail!("Cannot find player");
+                };
+                let Some(kicker_lobby_id) = kicker.in_lobby else {
+                    bail!("Cannot kick player while not in a lobby");
+                };
+                let Some(kickee_lobby_id) = kickee.in_lobby else {
+                    bail!("Cannot kick player not in a lobby");
+                };
+                if kicker_lobby_id != kickee_lobby_id {
+                    bail!("Cannot kick player not in same lobby");
+                }
+                let Some(lobby) = self.lobbies.get_mut(&kicker_lobby_id) else {
+                    bail!("Cannot find lobby");
+                };
+                if lobby.leader != from {
+                    bail!("Cannot kick player when not lobby leader");
+                }
+
+                self.remove_player_from_lobby(id, LeaveReason::Kicked)
+            }
+            ClientToLobby::SwitchPlayerTeam { id, team } => {
+                
             },
-            ClientToLobby::SwitchPlayerTeam { id, team } => todo!(),
             ClientToLobby::GetLobbySettings => todo!(),
             ClientToLobby::SetLobbySettings { settings } => todo!(),
             ClientToLobby::SetReady { ready } => todo!(),
@@ -411,6 +412,47 @@ impl State {
             ClientToLobby::SelectChampion { champion } => todo!(),
             ClientToLobby::SetChampionLocked { locked } => todo!(),
         }
+    }
+
+    fn remove_player_from_lobby(&mut self, player_id: PlayerId, reason: LeaveReason) -> anyhow::Result<()> {
+        let player = self.players.get(&player_id).ok_or(anyhow!("Cannot find player"))?;
+        let Some(lobby_id) = player.in_lobby else {
+            bail!("Cannot leave lobby while not in a lobby");
+        };
+        let Some(lobby) = self.lobbies.get_mut(&lobby_id) else {
+            bail!("Cannot find lobby");
+        };
+        let old_leader = lobby.leader;
+        lobby.remove_player(player_id);
+        let new_leader = lobby.leader;
+        if lobby.player_count() == 0 {
+            self.lobbies.remove(&lobby_id);
+        } else {
+            if lobby.lobby_state == LobbyState::ChampSelect {
+                lobby.set_lobby_state(LobbyState::Normal);
+                self.send_message_to_lobby(
+                    lobby_id,
+                    None,
+                    LobbyToClient::LobbyStateChanged {
+                        new_state: LobbyState::Normal,
+                    },
+                );
+            }
+            if old_leader != new_leader {
+                self.send_message_to_lobby(
+                    lobby_id,
+                    None,
+                    LobbyToClient::PlayerBecameLeader { player: new_leader },
+                );
+            }
+            self.send_message_to_lobby(
+                lobby_id,
+                None,
+                LobbyToClient::PlayerLeftLobby { player: player_id },
+            );
+        }
+        self.send_message(player_id, LobbyToClient::LeftLobby { reason });
+        Ok(())
     }
 
     fn find_username(&self, wanted: &str) -> String {
@@ -459,7 +501,12 @@ impl State {
         }
     }
 
-    fn send_message_to_lobby(&self, to: LobbyId, message: LobbyToClient) {
+    fn send_message_to_lobby(
+        &self,
+        to: LobbyId,
+        except_player: Option<PlayerId>,
+        message: LobbyToClient,
+    ) {
         let Some(lobby) = self.lobbies.get(&to) else {
             return;
         };
@@ -468,6 +515,7 @@ impl State {
             .iter()
             .flatten()
             .map(|p| p.id)
+            .filter(|p| Some(*p) != except_player)
             .collect::<Vec<_>>()
         {
             self.send_message(player, message.clone());
