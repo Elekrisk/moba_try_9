@@ -2,7 +2,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail};
 use common::{
-    ChampionId, ClientToLobby, LeaveReason, LobbyId, LobbyInfo, LobbySettings, LobbyState, LobbyToClient, PlayerId, PlayerInfo, ReadMsg, ShortLobbyInfo, Team, WriteMsg
+    ChampionId, ClientToLobby, LeaveReason, LobbyId, LobbyInfo, LobbySettings, LobbyState,
+    LobbyToClient, PlayerId, PlayerInfo, ReadMsg, ShortLobbyInfo, Team, WriteMsg,
 };
 use quinn::{
     Connection, Endpoint, Incoming, RecvStream, SendStream, ServerConfig, crypto,
@@ -67,19 +68,22 @@ impl Lobby {
         });
     }
 
-    fn remove_player(&mut self, player: PlayerId) {
+    fn remove_player(&mut self, player: PlayerId, temporarily: bool) -> Option<PlayerInLobby> {
+        let mut removed_player = None;
         for team in &mut self.players {
             let Some(index) = team.iter().position(|p| p.id == player) else {
                 continue;
             };
-            team.remove(index);
+            removed_player = Some(team.remove(index));
             break;
         }
-        if self.leader == player
+        if !temporarily
+            && self.leader == player
             && let Some(player) = self.players.iter().flatten().map(|p| p.id).next()
         {
             self.leader = player;
         }
+        removed_player
     }
 
     fn find_smallest_team(&self) -> Team {
@@ -338,6 +342,7 @@ impl State {
                         team_count: 2,
                         players_per_team: 5,
                         locked: false,
+                        allows_team_switching: true,
                     },
                     players: vec![
                         vec![PlayerInLobby {
@@ -376,9 +381,7 @@ impl State {
                 self.send_message(from, LobbyToClient::JoinedLobby { id });
                 Ok(())
             }
-            ClientToLobby::LeaveLobby => {
-                self.remove_player_from_lobby(from, LeaveReason::Leave)
-            }
+            ClientToLobby::LeaveLobby => self.remove_player_from_lobby(from, LeaveReason::Leave),
             ClientToLobby::KickPlayer { id } => {
                 let kicker = self.players.get(&from).unwrap();
                 let Some(kickee) = self.players.get(&id) else {
@@ -403,8 +406,41 @@ impl State {
                 self.remove_player_from_lobby(id, LeaveReason::Kicked)
             }
             ClientToLobby::SwitchPlayerTeam { id, team } => {
-                
-            },
+                let player = self.players.get(&from).unwrap();
+                let player_to_move = self.players.get(&id).unwrap();
+                let Some(lobby_id) = player.in_lobby else {
+                    bail!("Cannot switch team while not in a lobby");
+                };
+                if player.in_lobby != player_to_move.in_lobby {
+                    bail!("Cannot switch team of player not in same lobby as you");
+                };
+                let Some(lobby) = self.lobbies.get_mut(&lobby_id) else {
+                    bail!("Cannot find lobby");
+                };
+                if from != id && lobby.leader != from {
+                    bail!("Cannot switch team of other player when not lobby leader");
+                }
+                if lobby.leader != from && lobby.settings.allows_team_switching {
+                    bail!("Cannot switch team when team switching disabled");
+                }
+                let Some(players) = lobby.players.get(team.0) else {
+                    bail!("Team {} doesn't exist", team.0);
+                };
+                if players.len() >= lobby.settings.players_per_team {
+                    bail!("Team {} is full", team.0);
+                }
+
+                let removed_player = lobby.remove_player(id, true);
+                lobby.players[team.0].push(removed_player.ok_or(anyhow!("Player not found"))?);
+
+                self.send_message_to_lobby(
+                    lobby_id,
+                    None,
+                    LobbyToClient::PlayerSwitchedTeam { player: id, team },
+                );
+
+                Ok(())
+            }
             ClientToLobby::GetLobbySettings => todo!(),
             ClientToLobby::SetLobbySettings { settings } => todo!(),
             ClientToLobby::SetReady { ready } => todo!(),
@@ -414,8 +450,15 @@ impl State {
         }
     }
 
-    fn remove_player_from_lobby(&mut self, player_id: PlayerId, reason: LeaveReason) -> anyhow::Result<()> {
-        let player = self.players.get(&player_id).ok_or(anyhow!("Cannot find player"))?;
+    fn remove_player_from_lobby(
+        &mut self,
+        player_id: PlayerId,
+        reason: LeaveReason,
+    ) -> anyhow::Result<()> {
+        let player = self
+            .players
+            .get(&player_id)
+            .ok_or(anyhow!("Cannot find player"))?;
         let Some(lobby_id) = player.in_lobby else {
             bail!("Cannot leave lobby while not in a lobby");
         };
@@ -423,7 +466,7 @@ impl State {
             bail!("Cannot find lobby");
         };
         let old_leader = lobby.leader;
-        lobby.remove_player(player_id);
+        lobby.remove_player(player_id, false);
         let new_leader = lobby.leader;
         if lobby.player_count() == 0 {
             self.lobbies.remove(&lobby_id);

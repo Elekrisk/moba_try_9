@@ -74,6 +74,7 @@ pub struct LobbySettings {
     pub team_count: usize,
     pub players_per_team: usize,
     pub locked: bool,
+    pub allows_team_switching: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,10 +176,6 @@ pub enum LeaveReason {
     Kicked,
 }
 
-
-
-
-
 #[allow(async_fn_in_trait)]
 pub trait WriteMsg {
     async fn write_msg<T: Serialize>(&mut self, msg: &T) -> anyhow::Result<()>;
@@ -196,11 +193,11 @@ impl WriteMsg for SendStream {
 
 #[allow(async_fn_in_trait)]
 pub trait ReadMsg {
-    async fn read_msg<T: for <'de> Deserialize<'de>>(&mut self) -> anyhow::Result<T>;
+    async fn read_msg<T: for<'de> Deserialize<'de>>(&mut self) -> anyhow::Result<T>;
 }
 
 impl ReadMsg for RecvStream {
-    async fn read_msg<T: for <'de> Deserialize<'de>>(&mut self) -> anyhow::Result<T> {
+    async fn read_msg<T: for<'de> Deserialize<'de>>(&mut self) -> anyhow::Result<T> {
         let mut len_buffer = [0; std::mem::size_of::<u32>()];
         self.read_exact(&mut len_buffer).await?;
         let len = u32::from_be_bytes(len_buffer);
@@ -210,4 +207,3 @@ impl ReadMsg for RecvStream {
         Ok(msg)
     }
 }
-
